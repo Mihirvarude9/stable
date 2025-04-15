@@ -61,7 +61,7 @@ except Exception as e:
 
 class GenerateRequest(BaseModel):
     prompt: str
-    num_steps: Optional[int] = 60
+    num_steps: Optional[int] = 28
     guidance_scale: Optional[float] = 7.0
 
 class GenerateResponse(BaseModel):
