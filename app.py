@@ -68,7 +68,7 @@ class GenerateResponse(BaseModel):
     image: str
     status: str
 
-def generate_image(prompt: str, num_steps: int = 60, guidance_scale: float = 7.0) -> Image.Image:
+def generate_image(prompt: str, num_steps: int = 28, guidance_scale: float = 7.0) -> Image.Image:
     try:
         print(f"Generating image with prompt: {prompt}")
         image = pipeline(
