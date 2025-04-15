@@ -21,9 +21,10 @@ app = FastAPI(title="Stable Diffusion API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins temporarily for testing
-    allow_credentials=True,  # Must be False when allow_origins=["*"]
+    allow_credentials=False,  # Must be False when allow_origins=["*"]
     allow_methods=["*"],  # Allow all methods
     allow_headers=["*"],  # Allow all headers
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 # API Key security
@@ -130,5 +131,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7861)
-
+    uvicorn.run(app, host="127.0.0.1", port=7861)
