@@ -11,31 +11,22 @@ from PIL import Image
 import os
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
-
-# Initialize FastAPI app
 app = FastAPI(title="Stable Diffusion API")
-
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins temporarily for testing
-    allow_credentials=False,  # Must be False when allow_origins=["*"]
-    allow_methods=["*"],  # Allow all methods
-    allow_headers=["*"],  # Allow all headers
-    max_age=3600,  # Cache preflight requests for 1 hour
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    max_age=3600,
 )
-
-# API Key security
 API_KEY = os.getenv("API_KEY", "your-secret-key-here")
 api_key_header = APIKeyHeader(name="Authorization")
 
 async def verify_api_key(request: Request, authorization: str = Header(None)):
-    # Skip validation for OPTIONS requests
     if request.method == "OPTIONS":
         return None
-        
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=403, detail="Invalid API key format")
     api_key = authorization.replace("Bearer ", "")
@@ -43,29 +34,22 @@ async def verify_api_key(request: Request, authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid API key")
     return api_key
 
-# Model loading
 model_id = "stabilityai/stable-diffusion-3.5-large"
-
-# Ensure quantization uses the correct data type
 nf4_config = BitsAndBytesConfig(
     load_in_4bit=True,
     bnb_4bit_quant_type="nf4",
     bnb_4bit_compute_dtype=torch.float16
 )
-
 print("Loading model...")
 try:
-    # Load the Transformer model with quantization
     model_nf4 = SD3Transformer2DModel.from_pretrained(
         model_id,
         subfolder="transformer",
         quantization_config=nf4_config,
         torch_dtype=torch.float16
     )
-
-    # Load Stable Diffusion pipeline
     pipeline = StableDiffusion3Pipeline.from_pretrained(
-        model_id, 
+        model_id,
         transformer=model_nf4,
         torch_dtype=torch.float16
     )
@@ -75,20 +59,18 @@ except Exception as e:
     print(f"Error loading model: {str(e)}")
     raise e
 
-# Pydantic models for request/response
 class GenerateRequest(BaseModel):
     prompt: str
     num_steps: Optional[int] = 60
     guidance_scale: Optional[float] = 7.0
 
 class GenerateResponse(BaseModel):
-    image: str  # Base64 encoded image
+    image: str
     status: str
 
 def generate_image(prompt: str, num_steps: int = 60, guidance_scale: float = 7.0) -> Image.Image:
     try:
         print(f"Generating image with prompt: {prompt}")
-        # Generate image
         image = pipeline(
             prompt=prompt,
             num_inference_steps=num_steps,
@@ -131,4 +113,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=7861)
+    uvicorn.run(app, host="0.0.0.0", port=7861)
