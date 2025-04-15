@@ -21,10 +21,9 @@ app = FastAPI(title="Stable Diffusion API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allow all origins temporarily for testing
-    allow_credentials=False,  # Must be False when allow_origins=["*"]
+    allow_credentials=True,  # Must be False when allow_origins=["*"]
     allow_methods=["*"],  # Allow all methods
     allow_headers=["*"],  # Allow all headers
-    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
 # API Key security
