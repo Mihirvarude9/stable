@@ -1,0 +1,14 @@
+torch
+diffusers
+transformers
+fastapi
+uvicorn
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+python-dotenv
+pillow
+accelerate
+safetensors
+bitsandbytes
+pydantic
