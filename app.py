@@ -17,6 +17,11 @@ from queue import Queue
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "your-secret-key")
 
+origins = [
+    "https://sd-deploy-ripx.vercel.app",  # Allow your frontend's domain
+    # You can add more domains here
+]
+
 # App config
 app = FastAPI(title="SD3.5 Parallel Pool")
 app.add_middleware(
