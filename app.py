@@ -11,12 +11,14 @@ import base64
 import torch
 import asyncio
 import os
+from queue import Queue
 
-# Load environment
+# Load .env
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "your-secret-key")
 
-app = FastAPI(title="SD3.5 Parallel Generator")
+# App config
+app = FastAPI(title="SD3.5 Parallel Pool")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,7 +27,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Schema
+# Request / Response
 class GenerateRequest(BaseModel):
     prompt: str
     num_steps: Optional[int] = 28
@@ -35,7 +37,7 @@ class GenerateResponse(BaseModel):
     image: str
     status: str
 
-# API key auth
+# API key check
 api_key_header = APIKeyHeader(name="Authorization")
 
 async def verify_api_key(request: Request, authorization: str = Header(None)):
@@ -45,35 +47,34 @@ async def verify_api_key(request: Request, authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid API key")
     return authorization
 
-# Shared base components
-base_components = {}
-
+# Image encoder
 def image_to_base64(img: Image.Image) -> str:
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-# Clone pipeline for each request
+# Global queue of pipelines
+pipeline_queue: Queue = Queue()
+
+# Inference using next available pipeline
 def run_inference(prompt: str, steps: int, scale: float) -> Image.Image:
-    pipe = StableDiffusion3Pipeline(
-        vae=base_components["vae"],
-        text_encoder=base_components["text_encoder"],
-        tokenizer=base_components["tokenizer"],
-        unet=base_components["unet"],
-        scheduler=base_components["scheduler"],
-        feature_extractor=base_components["feature_extractor"],
-        safety_checker=None,
-        requires_safety_checker=False
-    )
-    pipe.to("cuda")
+    pipe = pipeline_queue.get()
+    try:
+        with torch.inference_mode():
+            image = pipe(prompt=prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
+        return image
+    finally:
+        pipeline_queue.put(pipe)
 
-    with torch.inference_mode():
-        result = pipe(prompt=prompt, num_inference_steps=steps, guidance_scale=scale)
-        return result.images[0]
-
-# Async wrapper to trigger multiple generations in parallel
 async def generate_image(prompt: str, steps: int, scale: float):
     return await asyncio.to_thread(run_inference, prompt, steps, scale)
+
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "healthy",
+        "pipeline_pool_size": pipeline_queue.qsize()
+    }
 
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
@@ -84,43 +85,34 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-@app.get("/api/health")
-async def health():
-    return {"status": "healthy", "components_loaded": bool(base_components)}
-
 @app.on_event("startup")
-def preload_components():
-    global base_components
-    print("🚀 Preloading SD3.5 components for cloning...")
+def load_multiple_pipelines():
+    global pipeline_queue
+    num_pipelines = 4  # Tune this based on your A100 VRAM
+
+    print(f"🚀 Loading {num_pipelines} instances of SD3.5 for concurrent processing...")
 
     model_id = "stabilityai/stable-diffusion-3.5-large"
 
-    transformer = SD3Transformer2DModel.from_pretrained(
-        model_id,
-        subfolder="transformer",
-        quantization_config=BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16
-        ),
-        torch_dtype=torch.float16
-    )
+    for i in range(num_pipelines):
+        print(f"🔧 Loading pipeline {i + 1}/{num_pipelines}...")
+        transformer = SD3Transformer2DModel.from_pretrained(
+            model_id,
+            subfolder="transformer",
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16
+            ),
+            torch_dtype=torch.float16
+        )
+        pipe = StableDiffusion3Pipeline.from_pretrained(
+            model_id,
+            transformer=transformer,
+            torch_dtype=torch.float16
+        )
+        pipe.to("cuda")
+        pipe.enable_model_cpu_offload()
+        pipeline_queue.put(pipe)
 
-    pipe = StableDiffusion3Pipeline.from_pretrained(
-        model_id,
-        transformer=transformer,
-        torch_dtype=torch.float16
-    )
-    pipe.to("cuda")
-    pipe.enable_model_cpu_offload()
-
-    base_components = {
-        "vae": pipe.vae,
-        "text_encoder": pipe.text_encoder,
-        "tokenizer": pipe.tokenizer,
-        "unet": pipe.unet,
-        "scheduler": pipe.scheduler,
-        "feature_extractor": pipe.feature_extractor
-    }
-
-    print("✅ SD3.5 components loaded for parallel use.")
+    print("✅ All SD3.5 pipelines are ready.")
