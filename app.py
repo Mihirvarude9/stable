@@ -10,19 +10,24 @@ from io import BytesIO
 from PIL import Image
 import os
 from dotenv import load_dotenv
+import asyncio
 
 load_dotenv()
 app = FastAPI(title="Stable Diffusion API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
     max_age=3600,
 )
+
 API_KEY = os.getenv("API_KEY", "your-secret-key-here")
 api_key_header = APIKeyHeader(name="Authorization")
+
+# Concurrency lock
+model_lock = asyncio.Lock()
 
 async def verify_api_key(request: Request, authorization: str = Header(None)):
     if request.method == "OPTIONS":
@@ -68,21 +73,6 @@ class GenerateResponse(BaseModel):
     image: str
     status: str
 
-def generate_image(prompt: str, num_steps: int = 28, guidance_scale: float = 7.0) -> Image.Image:
-    try:
-        print(f"Generating image with prompt: {prompt}")
-        image = pipeline(
-            prompt=prompt,
-            num_inference_steps=num_steps,
-            guidance_scale=guidance_scale,
-            max_sequence_length=512,
-        ).images[0]
-        print("Image generated successfully!")
-        return image
-    except Exception as e:
-        print(f"Error generating image: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 def image_to_base64(image: Image.Image) -> str:
     buffered = BytesIO()
     image.save(buffered, format="PNG")
@@ -90,22 +80,23 @@ def image_to_base64(image: Image.Image) -> str:
 
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest, api_key: str = Depends(verify_api_key)):
-    try:
-        image = generate_image(
-            prompt=request.prompt,
-            num_steps=request.num_steps,
-            guidance_scale=request.guidance_scale
-        )
-        return GenerateResponse(
-            image=image_to_base64(image),
-            status="success"
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.options("/api/generate")
-async def generate_options():
-    return {"message": "OK"}
+    async with model_lock:
+        try:
+            print(f"Generating image with prompt: {request.prompt}")
+            image = pipeline(
+                prompt=request.prompt,
+                num_inference_steps=request.num_steps,
+                guidance_scale=request.guidance_scale,
+                max_sequence_length=512,
+            ).images[0]
+            print("Image generated successfully!")
+            return GenerateResponse(
+                image=image_to_base64(image),
+                status="success"
+            )
+        except Exception as e:
+            print(f"Error generating image: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/health")
 async def health_check():
@@ -113,4 +104,4 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=7861)
+    uvicorn.run("app:app", host="0.0.0.0", port=7861, reload=False)
