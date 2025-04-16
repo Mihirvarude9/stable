@@ -4,19 +4,23 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
-from diffusers import BitsAndBytesConfig, StableDiffusion3Pipeline, SD3Transformer2DModel
-import torch
+from diffusers import StableDiffusion3Pipeline, SD3Transformer2DModel, BitsAndBytesConfig
 from PIL import Image
 from io import BytesIO
 import base64
+import torch
 import asyncio
 import os
 
+# Load env
 load_dotenv()
-app = FastAPI(title="Stable Diffusion 3.5 Concurrent API")
-base_pipeline = None
 API_KEY = os.getenv("API_KEY", "your-secret-key")
-api_key_header = APIKeyHeader(name="Authorization")
+model_id = "stabilityai/stable-diffusion-3.5-large"
+
+# Globals
+app = FastAPI(title="SD3.5 Concurrent API")
+base_components = {}
+semaphore = asyncio.Semaphore(15)  # limit 15 concurrent jobs
 
 # Middleware
 app.add_middleware(
@@ -27,17 +31,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
-class GenerateRequest(BaseModel):
-    prompt: str
-    num_steps: Optional[int] = 30
-    guidance_scale: Optional[float] = 7.5
+# Auth
+api_key_header = APIKeyHeader(name="Authorization")
 
-class GenerateResponse(BaseModel):
-    image: str
-    status: str
-
-# API Key Verification
 async def verify_api_key(request: Request, authorization: str = Header(None)):
     if request.method == "OPTIONS":
         return None
@@ -47,36 +43,50 @@ async def verify_api_key(request: Request, authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid API key")
     return authorization
 
-# Convert PIL image to base64
-def image_to_base64(image: Image.Image) -> str:
+# Models
+class GenerateRequest(BaseModel):
+    prompt: str
+    num_steps: Optional[int] = 28
+    guidance_scale: Optional[float] = 7.0
+
+class GenerateResponse(BaseModel):
+    image: str
+    status: str
+
+# Utilities
+def image_to_base64(img: Image.Image) -> str:
     buffer = BytesIO()
-    image.save(buffer, format="PNG")
-    return base64.b64encode(buffer.getvalue()).decode()
+    img.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-# Clone pipeline per request to avoid blocking
-def generate_image(prompt: str, steps: int, scale: float):
-    local_pipe = StableDiffusion3Pipeline(
-        vae=base_pipeline.vae,
-        text_encoder=base_pipeline.text_encoder,
-        tokenizer=base_pipeline.tokenizer,
-        unet=base_pipeline.unet,
-        scheduler=base_pipeline.scheduler,
-        feature_extractor=base_pipeline.feature_extractor,
-        safety_checker=None,
-        requires_safety_checker=False
+def generate_image(prompt: str, steps: int, scale: float) -> Image.Image:
+    pipe = StableDiffusion3Pipeline(
+        vae=base_components["vae"],
+        text_encoder=base_components["text_encoder"],
+        tokenizer=base_components["tokenizer"],
+        unet=base_components["unet"],
+        scheduler=base_components["scheduler"],
+        feature_extractor=base_components["feature_extractor"],
+        requires_safety_checker=False,
+        safety_checker=None
     )
-    local_pipe.to("cuda")
+    pipe.to("cuda", torch_dtype=torch.float16)
     with torch.inference_mode():
-        image = local_pipe(prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
-        return image
+        output = pipe(prompt, num_inference_steps=steps, guidance_scale=scale)
+    return output.images[0]
 
-# Async API endpoint
+async def async_generate_image(prompt: str, steps: int, scale: float) -> Image.Image:
+    async with semaphore:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, generate_image, prompt, steps, scale)
+
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest, api_key: str = Depends(verify_api_key)):
     try:
-        loop = asyncio.get_running_loop()
-        image = await loop.run_in_executor(
-            None, generate_image, request.prompt, request.num_steps, request.guidance_scale
+        image = await async_generate_image(
+            prompt=request.prompt,
+            steps=request.num_steps,
+            scale=request.guidance_scale
         )
         return GenerateResponse(image=image_to_base64(image), status="success")
     except Exception as e:
@@ -84,21 +94,19 @@ async def generate(request: GenerateRequest, api_key: str = Depends(verify_api_k
 
 @app.get("/api/health")
 async def health():
-    return {"status": "healthy", "model_loaded": base_pipeline is not None}
+    return {"status": "healthy", "model_loaded": bool(base_components)}
 
-# Load model on startup
+# Model loading
 @app.on_event("startup")
 def load_model():
-    global base_pipeline
-    print("🚀 Loading base model...")
+    global base_components
+    print("🚀 Loading Stable Diffusion 3.5 Large...")
 
-    model_id = "stabilityai/stable-diffusion-3.5-large"
     nf4_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.float16
     )
-
     transformer = SD3Transformer2DModel.from_pretrained(
         model_id,
         subfolder="transformer",
@@ -106,12 +114,21 @@ def load_model():
         torch_dtype=torch.float16
     )
 
-    base_pipeline = StableDiffusion3Pipeline.from_pretrained(
+    pipe = StableDiffusion3Pipeline.from_pretrained(
         model_id,
         transformer=transformer,
         torch_dtype=torch.float16
     )
-    base_pipeline.to("cuda")
-    base_pipeline.enable_model_cpu_offload()
+    pipe.to("cuda")
+    pipe.enable_model_cpu_offload()
 
-    print("✅ Base pipeline loaded successfully.")
+    # Store components
+    base_components = {
+        "vae": pipe.vae,
+        "text_encoder": pipe.text_encoder,
+        "tokenizer": pipe.tokenizer,
+        "unet": pipe.unet,
+        "scheduler": pipe.scheduler,
+        "feature_extractor": pipe.feature_extractor
+    }
+    print("✅ Model components loaded and ready.")
