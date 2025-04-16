@@ -26,10 +26,11 @@ origins = [
 app = FastAPI(title="SD3.5 Parallel Pool")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=["https://sd-deploy-ripx.vercel.app"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Authorization"],
 )
 
 # Request / Response
@@ -93,7 +94,7 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
 @app.on_event("startup")
 def load_multiple_pipelines():
     global pipeline_queue
-    num_pipelines = 4  # Tune this based on your A100 VRAM
+    num_pipelines = 1  # Tune this based on your A100 VRAM
 
     print(f"🚀 Loading {num_pipelines} instances of SD3.5 for concurrent processing...")
 
