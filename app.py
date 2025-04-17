@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 from diffusers import StableDiffusion3Pipeline, BitsAndBytesConfig, SD3Transformer2DModel
 from PIL import Image
@@ -12,22 +12,19 @@ import base64
 import torch
 import asyncio
 import os
-from queue import Queue
 
 # Load environment variables
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "your-secret-key")
 
-# CORS setup for Vercel frontend
+# Initialize FastAPI
+app = FastAPI(title="SD3.5 A100 Concurrent Inference")
+
+# CORS for frontend access
 origins = [
-    "https://sd-deploy-wgx123.vercel.app/",  # Replace with your actual deployed domain
+    "https://sd-deploy-ripx.vercel.app",  # Replace with your actual Vercel domain
     "http://localhost:3000"
 ]
-
-# Initialize FastAPI
-app = FastAPI(title="SD3.5 Parallel Pool")
-
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -46,7 +43,7 @@ class GenerateResponse(BaseModel):
     image: str
     status: str
 
-# API Key Middleware
+# API key
 api_key_header = APIKeyHeader(name="Authorization")
 
 async def verify_api_key(request: Request, authorization: str = Header(None)):
@@ -56,29 +53,34 @@ async def verify_api_key(request: Request, authorization: str = Header(None)):
         raise HTTPException(status_code=403, detail="Invalid API key")
     return authorization
 
-# Base64 Image Conversion
+# Image conversion
 def image_to_base64(img: Image.Image) -> str:
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-# Global pipeline queue
-pipeline_queue: Queue = Queue()
+# Global pipeline pool & semaphore
+pipeline_pool: List[StableDiffusion3Pipeline] = []
+pipeline_semaphore: asyncio.Semaphore = None
 
-# Inference logic
-def run_inference(prompt: str, steps: int, scale: float) -> Image.Image:
-    pipe = pipeline_queue.get()
+# Run inference with selected pipeline
+def run_inference_with_pipeline(pipe, prompt, steps, scale):
+    with torch.inference_mode():
+        result = pipe(prompt=prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
+    return result
+
+# Async wrapper for inference
+async def generate_image(prompt: str, steps: int, scale: float):
+    await pipeline_semaphore.acquire()
     try:
-        with torch.inference_mode():
-            image = pipe(prompt=prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
+        pipe = pipeline_pool.pop()
+        image = await asyncio.to_thread(run_inference_with_pipeline, pipe, prompt, steps, scale)
         return image
     finally:
-        pipeline_queue.put(pipe)
+        pipeline_pool.append(pipe)
+        pipeline_semaphore.release()
 
-async def generate_image(prompt: str, steps: int, scale: float):
-    return await asyncio.to_thread(run_inference, prompt, steps, scale)
-
-# Preflight OPTIONS handler
+# CORS preflight
 @app.options("/api/generate")
 async def preflight_handler():
     return JSONResponse(status_code=200, content={"message": "CORS preflight successful"})
@@ -88,10 +90,11 @@ async def preflight_handler():
 async def health():
     return {
         "status": "healthy",
-        "pipeline_pool_size": pipeline_queue.qsize()
+        "available_slots": pipeline_semaphore._value,
+        "total_pipelines": len(pipeline_pool)
     }
 
-# Main inference endpoint
+# Main generate endpoint
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
     try:
@@ -101,18 +104,22 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# Load SD3.5 pipelines on startup
+# Load all pipelines on startup
 @app.on_event("startup")
 def load_multiple_pipelines():
-    global pipeline_queue
-    num_pipelines = 1  # You can increase if VRAM allows
+    global pipeline_pool, pipeline_semaphore
 
-    print(f"🚀 Loading {num_pipelines} instances of SD3.5 for concurrent processing...")
+    num_pipelines = 2  # Adjust based on A100 memory (~2-3 typically safe)
+
+    pipeline_pool = []
+    pipeline_semaphore = asyncio.Semaphore(num_pipelines)
+
+    print(f"🚀 Loading {num_pipelines} SD3.5 pipelines...")
 
     model_id = "stabilityai/stable-diffusion-3.5-large"
 
     for i in range(num_pipelines):
-        print(f"🔧 Loading pipeline {i + 1}/{num_pipelines}...")
+        print(f"🔧 Initializing pipeline {i+1}/{num_pipelines}...")
 
         transformer = SD3Transformer2DModel.from_pretrained(
             model_id,
@@ -133,6 +140,6 @@ def load_multiple_pipelines():
 
         pipe.to("cuda")
         pipe.enable_model_cpu_offload()
-        pipeline_queue.put(pipe)
+        pipeline_pool.append(pipe)
 
-    print("✅ All SD3.5 pipelines are ready.")
+    print("✅ All pipelines loaded and ready for concurrent generation.")
