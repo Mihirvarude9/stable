@@ -16,18 +16,25 @@ from queue import Queue
 # Load .env
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "your-secret-key")
+
 # App config
 app = FastAPI(title="SD3.5 Parallel Pool")
+
+# ✅ Allow CORS from your Vercel frontend
+origins = [
+    "https://sd-deploy-ripx.vercel.app",  # ✅ Vercel frontend
+    "http://localhost:3000"               # ✅ Local dev (optional)
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://sd-deploy-ripx.vercel.app"],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Authorization"],
+    allow_methods=["*"],  # Includes POST, GET, OPTIONS
+    allow_headers=["*"],  # Includes Content-Type, Authorization, etc.
 )
 
-# Request / Response
+# Request/Response models
 class GenerateRequest(BaseModel):
     prompt: str
     num_steps: Optional[int] = 28
@@ -69,6 +76,7 @@ def run_inference(prompt: str, steps: int, scale: float) -> Image.Image:
 async def generate_image(prompt: str, steps: int, scale: float):
     return await asyncio.to_thread(run_inference, prompt, steps, scale)
 
+# Health check endpoint
 @app.get("/api/health")
 async def health():
     return {
@@ -76,6 +84,7 @@ async def health():
         "pipeline_pool_size": pipeline_queue.qsize()
     }
 
+# Image generation endpoint
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
     try:
@@ -85,6 +94,7 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
+# Load model(s) on startup
 @app.on_event("startup")
 def load_multiple_pipelines():
     global pipeline_queue
