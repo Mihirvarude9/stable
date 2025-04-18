@@ -17,23 +17,21 @@ import os
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "your-secret-key")
 
-# Initialize FastAPI
 app = FastAPI(title="SD3.5 A100 Concurrent Inference")
 
-# CORS for frontend access
-origins = [
-    "https://sd-deploy-ripx.vercel.app",  # Replace with your actual Vercel domain
-    "http://localhost:3000"
-]
+# ✅ Correct CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[
+        "https://sd-deploy-ripx.vercel.app",  # ✅ replace with your deployed frontend domain
+        "http://localhost:3000"               # ✅ local dev support
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Models
+# ✅ Models
 class GenerateRequest(BaseModel):
     prompt: str
     num_steps: Optional[int] = 28
@@ -43,33 +41,36 @@ class GenerateResponse(BaseModel):
     image: str
     status: str
 
-# API key
+# ✅ API key logic
 api_key_header = APIKeyHeader(name="Authorization")
 
 async def verify_api_key(request: Request, authorization: str = Header(None)):
+    if request.method == "OPTIONS":
+        return  # allow preflight OPTIONS without auth
+
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=403, detail="Invalid API key format")
+
     if authorization.replace("Bearer ", "") != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
+    
     return authorization
 
-# Image conversion
+# ✅ Image conversion
 def image_to_base64(img: Image.Image) -> str:
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-# Global pipeline pool & semaphore
+# ✅ Concurrent pipeline pool
 pipeline_pool: List[StableDiffusion3Pipeline] = []
 pipeline_semaphore: asyncio.Semaphore = None
 
-# Run inference with selected pipeline
+# ✅ Inference logic
 def run_inference_with_pipeline(pipe, prompt, steps, scale):
     with torch.inference_mode():
-        result = pipe(prompt=prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
-    return result
+        return pipe(prompt=prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
 
-# Async wrapper for inference
 async def generate_image(prompt: str, steps: int, scale: float):
     await pipeline_semaphore.acquire()
     try:
@@ -80,12 +81,12 @@ async def generate_image(prompt: str, steps: int, scale: float):
         pipeline_pool.append(pipe)
         pipeline_semaphore.release()
 
-# CORS preflight
+# ✅ CORS preflight endpoint (optional, but makes things smooth)
 @app.options("/api/generate")
 async def preflight_handler():
-    return JSONResponse(status_code=200, content={"message": "CORS preflight successful"})
+    return JSONResponse(status_code=200, content={"message": "Preflight OK"})
 
-# Health check
+# ✅ Health check
 @app.get("/api/health")
 async def health():
     return {
@@ -94,7 +95,7 @@ async def health():
         "total_pipelines": len(pipeline_pool)
     }
 
-# Main generate endpoint
+# ✅ Image generation API
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
     try:
@@ -104,12 +105,12 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# Load all pipelines on startup
+# ✅ Load models on startup
 @app.on_event("startup")
 def load_multiple_pipelines():
     global pipeline_pool, pipeline_semaphore
 
-    num_pipelines = 2  # Adjust based on A100 memory (~2-3 typically safe)
+    num_pipelines = 2  # Safe for A100 — increase if stable
 
     pipeline_pool = []
     pipeline_semaphore = asyncio.Semaphore(num_pipelines)
