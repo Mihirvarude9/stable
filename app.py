@@ -5,7 +5,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from typing import Optional, List
 from dotenv import load_dotenv
-from diffusers import StableDiffusion3Pipeline, BitsAndBytesConfig, SD3Transformer2DModel
+from diffusers import StableDiffusion3Pipeline, SD3Transformer2DModel
 from PIL import Image
 from io import BytesIO
 import base64
@@ -13,26 +13,26 @@ import torch
 import asyncio
 import os
 
-# Load environment variables
+# ✅ Load environment variables
 load_dotenv()
 API_KEY = os.getenv("API_KEY", "your-secret-key")
 
-# Initialize FastAPI
-app = FastAPI(title="SD3.5 A100 Concurrent Inference")
+# ✅ Initialize FastAPI
+app = FastAPI(title="SD3.5 L40s Image Generator")
 
-# ✅ CORS setup
+# ✅ CORS middleware for frontend access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://sd-deploy-wgx123.vercel.app",  # ✅ your deployed frontend
-        "http://localhost:3000"                # ✅ local dev support
+        "https://sd-deploy-wgx123.vercel.app",  # Deployed frontend
+        "http://localhost:3000",                # Local frontend
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ✅ Request and Response Models
+# ✅ Request & Response Schemas
 class GenerateRequest(BaseModel):
     prompt: str
     num_steps: Optional[int] = 28
@@ -46,34 +46,30 @@ class GenerateResponse(BaseModel):
 api_key_header = APIKeyHeader(name="Authorization")
 
 async def verify_api_key(request: Request, authorization: str = Header(None)):
-    # ✅ Allow preflight (OPTIONS) without API key
     if request.method == "OPTIONS":
         return
-
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=403, detail="Invalid API key format")
-
     if authorization.replace("Bearer ", "") != API_KEY:
         raise HTTPException(status_code=403, detail="Invalid API key")
-
     return authorization
 
-# ✅ Image conversion to Base64
+# ✅ Utility: Convert image to base64
 def image_to_base64(img: Image.Image) -> str:
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("utf-8")
 
-# ✅ Global pipeline pool and semaphore for concurrency
+# ✅ Global pool for concurrency
 pipeline_pool: List[StableDiffusion3Pipeline] = []
 pipeline_semaphore: asyncio.Semaphore = None
 
-# ✅ Synchronous pipeline execution
+# ✅ Sync inference logic
 def run_inference_with_pipeline(pipe, prompt, steps, scale):
     with torch.inference_mode():
         return pipe(prompt=prompt, num_inference_steps=steps, guidance_scale=scale).images[0]
 
-# ✅ Async wrapper for inference
+# ✅ Async inference wrapper
 async def generate_image(prompt: str, steps: int, scale: float):
     await pipeline_semaphore.acquire()
     try:
@@ -84,12 +80,12 @@ async def generate_image(prompt: str, steps: int, scale: float):
         pipeline_pool.append(pipe)
         pipeline_semaphore.release()
 
-# ✅ Preflight route
+# ✅ Preflight support
 @app.options("/api/generate")
 async def preflight_handler():
     return JSONResponse(status_code=200, content={"message": "Preflight OK"})
 
-# ✅ Health check
+# ✅ Health check endpoint
 @app.get("/api/health")
 async def health():
     return {
@@ -98,7 +94,7 @@ async def health():
         "total_pipelines": len(pipeline_pool)
     }
 
-# ✅ Main generation endpoint
+# ✅ Main image generation endpoint
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key)):
     try:
@@ -108,12 +104,12 @@ async def generate(req: GenerateRequest, api_key: str = Depends(verify_api_key))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
-# ✅ Load pipelines on startup
+# ✅ Pipeline loader on startup
 @app.on_event("startup")
 def load_multiple_pipelines():
     global pipeline_pool, pipeline_semaphore
 
-    num_pipelines = 2  # Safe for A100 – adjust based on VRAM
+    num_pipelines = 2  # Adjust based on L40s VRAM
     pipeline_pool = []
     pipeline_semaphore = asyncio.Semaphore(num_pipelines)
 
@@ -123,17 +119,14 @@ def load_multiple_pipelines():
     for i in range(num_pipelines):
         print(f"🔧 Initializing pipeline {i+1}/{num_pipelines}...")
 
+        # ✅ Load transformer without quantization
         transformer = SD3Transformer2DModel.from_pretrained(
             model_id,
             subfolder="transformer",
-            quantization_config=BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16
-            ),
             torch_dtype=torch.float16
         )
 
+        # ✅ Load main SD3.5 pipeline
         pipe = StableDiffusion3Pipeline.from_pretrained(
             model_id,
             transformer=transformer,
@@ -144,4 +137,4 @@ def load_multiple_pipelines():
         pipe.enable_model_cpu_offload()
         pipeline_pool.append(pipe)
 
-    print("✅ All pipelines loaded and ready for concurrent sdf.")
+    print("✅ All pipelines loaded successfully.")
