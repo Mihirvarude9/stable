@@ -144,4 +144,4 @@ def load_multiple_pipelines():
         pipe.enable_model_cpu_offload()
         pipeline_pool.append(pipe)
 
-    print("✅ All pipelines loaded and ready for concurrent generation.")
+    print("✅ All pipelines loaded and ready for concurrent sdf.")
